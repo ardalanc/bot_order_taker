@@ -12,13 +12,14 @@ texts = {
 
 
     # ... کلیدهای قبلی ...
-    "ORDER_HISTORY": "تاریخچه سفارشات",
-    "CURRENT_ORDERS": "سفارشات جاری",
+    "ORDER_HISTORY": "سفارشات",
     "FINANCE": "مالی",
     "HELP": "راهنما",
     "ABOAT_US": "درباره ما",
     "SUPORT": "پشتیبانی",
 
-
+"suport_message" : """ برای گزارش هرگونه مشکل در روند ربات به ایدی زیر مراجعه کنید\n@Ardalanch""",
+"aboatus_message" : """این متن درباره ما است""",
+"help_message" : """این متن راهنما است""",
 
 }

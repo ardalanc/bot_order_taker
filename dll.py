@@ -19,17 +19,18 @@ def create_table_user():
     cur = conn.cursor()
     SQL_Query = """
     CREATE TABLE users (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    chat_id    BIGINT UNIQUE NOT NULL,  -- تلگرام
-    name       VARCHAR(100),
-    phone      VARCHAR(20),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-"""
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    chat_id      BIGINT UNIQUE NOT NULL,
+    name         VARCHAR(100),
+    phone        VARCHAR(20),
+    is_superuser TINYINT(1) DEFAULT 0,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    """
     cur.execute(SQL_Query)
     conn.commit()
-    cur.close()
     conn.close()
+
     print(f'table user created successfully')
 
 def create_table_model():
@@ -57,7 +58,8 @@ def create_table_model_items():
     id       INT AUTO_INCREMENT PRIMARY KEY,
     model_id INT NOT NULL,
     name     VARCHAR(100) NOT NULL,
-    price    DECIMAL(12,0) NOT NULL,
+    price    DECIMAL(12,0) NULL,
+    side_type ENUM('none','both','single') DEFAULT 'none',
     FOREIGN KEY (model_id) REFERENCES models(id)
 );
 
@@ -144,4 +146,8 @@ def create_table_order_items():
 if __name__ == "__main__":
     drop_n_create_database()
     create_table_user()
-    
+    create_table_model()
+    create_table_model_items()
+    create_table_orders()
+    create_table_order_items()
+    create_table_order_files()
