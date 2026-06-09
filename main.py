@@ -14,6 +14,7 @@ save_model_state = {}  #
 admin_add_user_state = {}  
 admin_edit_user_state = {}  
 admin_item_state = {}  # {chat_id: {step, model_id, item_id, field}}
+admin_model_state = {}  # {chat_id: {step, data}}
 
 
 
@@ -22,71 +23,370 @@ admin_item_state = {}  # {chat_id: {step, model_id, item_id, field}}
 
 
 
-# در فایل dll.py
-
-def update_model_name(self, model_id, new_name):
-    query = "UPDATE models SET name = %s WHERE id = %s"
-    return self.execute_query(query, (new_name, model_id))
-
-def delete_model(self, model_id):
-    query = "DELETE FROM models WHERE id = %s"
-    return self.execute_query(query, (model_id,))
-
-def count_model_items(self, model_id):
-    query = "SELECT COUNT(*) FROM model_items WHERE model_id = %s"
-    result = self.fetch_all(query, (model_id,))
-    return result[0][0] if result else 0
 
 
 
-@bot.message_handler(func=lambda message: message.text == "مدیریت مدل‌ها 🏗️" and message.chat.id in ADMIN_IDS)
-def admin_models_list(message):
-    models = db.get_models()
+
+
+
+# ============================================================
+#  بخش مدیریت مدل‌ها — اضافه کن به main.py
+#  جای‌گذاری: بعد از بخش admin_items و قبل از info_listener
+# ============================================================
+#
+#  قبل از اضافه کردن این کد:
+#   1. تابع admin_models_list قدیمی (که با message_id و edit کار می‌کنه)
+#      رو از main.py حذف کن — این نسخه جایگزینش میشه
+#   2. متدهای update_model_name / delete_model / count_model_items
+#      که اشتباهاً داخل main.py هستن رو هم حذف کن
+# ============================================================
+
+
+# ─── state دیکشنری برای مدیریت مدل‌ها ───────────────────────
+# این خط رو بالای فایل main.py کنار بقیه state ها اضافه کن:
+# admin_model_state = {}   # {chat_id: {step, data}}
+
+
+# ─── توابع دیتابیس ───────────────────────────────────────────
+
+def db_get_models_with_count():
+    """لیست مدل‌ها به همراه تعداد آیتم هر کدام"""
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("""
+        SELECT m.id, m.name, COUNT(mi.id) AS item_count
+        FROM models m
+        LEFT JOIN model_items mi ON mi.model_id = m.id
+        GROUP BY m.id, m.name
+        ORDER BY m.id
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def db_add_model(name):
+    """افزودن مدل جدید — برمی‌گردونه model_id"""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO models (name) VALUES (%s)", (name,))
+    conn.commit()
+    model_id = cur.lastrowid
+    cur.close()
+    conn.close()
+    return model_id
+
+
+def db_update_model_name(model_id, new_name):
+    """ویرایش نام مدل"""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE models SET name=%s WHERE id=%s", (new_name, model_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_count_model_items(model_id):
+    """تعداد آیتم‌های یک مدل"""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM model_items WHERE model_id=%s", (model_id,))
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
+
+
+def db_delete_model(model_id):
+    """حذف مدل و آیتم‌هایش (cascade دستی)"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM model_items WHERE model_id=%s", (model_id,))
+        cur.execute("DELETE FROM models WHERE id=%s", (model_id,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ─── نمایش لیست مدل‌ها ───────────────────────────────────────
+
+def show_models_list(chat_id, message_id=None, edit=False):
+    """
+    نمایش لیست مدل‌ها با تعداد آیتم و دکمه‌های ویرایش/حذف/آیتم‌ها
+    """
+    models = db_get_models_with_count()
+
+    if models:
+        lines = ["🏗️ *مدیریت مدل‌ها*\n"]
+        for m in models:
+            lines.append(f"• *{m['name']}* — {m['item_count']} آیتم")
+        text = "\n".join(lines)
+    else:
+        text = "🏗️ *مدیریت مدل‌ها*\n\nهیچ مدلی ثبت نشده است."
+
     markup = InlineKeyboardMarkup()
-    
-    for model in models:
-        # نمایش هر مدل با دکمه‌های ویرایش و حذف
+    for m in models:
         markup.row(
-            InlineKeyboardButton(f"📁 {model[1]}", callback_data=f"ignore"),
-            InlineKeyboardButton("✏️", callback_data=f"admin_model_edit_{model[0]}"),
-            InlineKeyboardButton("❌", callback_data=f"admin_model_delete_{model[0]}")
+            InlineKeyboardButton(f"📁 {m['name']}  ({m['item_count']})",
+                                 callback_data=f"mdl_items_{m['id']}"),
+            InlineKeyboardButton("✏️", callback_data=f"mdl_edit_{m['id']}"),
+            InlineKeyboardButton("🗑️", callback_data=f"mdl_delete_{m['id']}"),
         )
-    
-    markup.add(InlineKeyboardButton("➕ افزودن مدل جدید", callback_data="admin_model_add"))
-    markup.add(InlineKeyboardButton("🔄 مدیریت آیتم‌ها", callback_data="admin_items_manage"))
-    
-    bot.send_message(message.chat.id, "🏗️ **لیست مدل‌های موجود:**\nیکی از گزینه‌های زیر را انتخاب کنید:", 
-                     reply_markup=markup, parse_mode="Markdown")
+    markup.add(InlineKeyboardButton("➕ افزودن مدل جدید", callback_data="mdl_add"))
+    markup.add(InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="admin_panel_back"))
+
+    if edit and message_id:
+        bot.edit_message_text(text, chat_id, message_id,
+                              parse_mode="Markdown", reply_markup=markup)
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 
+# ─── هندلر دکمه "مدیریت مدل‌ها 🏗️" از admin_menu ─────────────
+
+@bot.message_handler(func=lambda m: m.text == "مدیریت مدل‌ها 🏗️" and is_admin(m.chat.id))
+def handle_admin_models_btn(message):
+    show_models_list(message.chat.id)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_model_delete_"))
-def handle_delete_model(call):
-    model_id = int(call.data.split("_")[3])
-    item_count = db.count_model_items(model_id)
-    
+# ─── نمایش لیست (callback از داخل inline) ────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "mdl_list")
+def handle_mdl_list(call):
+    if not is_admin(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    show_models_list(call.message.chat.id, call.message.message_id, edit=True)
+
+
+# ─── رفتن به آیتم‌های یک مدل ─────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdl_items_"))
+def handle_mdl_items(call):
+    if not is_admin(call.message.chat.id):
+        return
+    model_id = int(call.data.split("_")[-1])
+    bot.answer_callback_query(call.id)
+    # استفاده از همان تابع موجود admin_items_list
+    admin_items_list(call.message.chat.id, model_id,
+                     call.message.message_id, edit=True)
+
+
+# ─── ویرایش نام مدل ──────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdl_edit_"))
+def handle_mdl_edit(call):
+    if not is_admin(call.message.chat.id):
+        return
+    model_id = int(call.data.split("_")[-1])
+    cid = call.message.chat.id
+    admin_model_state[cid] = {
+        "step": "edit_name",
+        "model_id": model_id,
+        "message_id": call.message.message_id,
+    }
+    bot.answer_callback_query(call.id)
+    bot.send_message(cid, "✏️ نام جدید مدل را وارد کنید:")
+
+
+@bot.message_handler(func=lambda m: admin_model_state.get(m.chat.id, {}).get("step") == "edit_name")
+def handle_mdl_edit_name_input(message):
+    if not is_admin(message.chat.id):
+        return
+    cid = message.chat.id
+    state = admin_model_state.pop(cid)
+    new_name = message.text.strip()
+
+    if not new_name:
+        bot.send_message(cid, "⚠️ نام نمی‌تواند خالی باشد.")
+        return
+
+    db_update_model_name(state["model_id"], new_name)
+    bot.send_message(cid, f"✅ نام مدل به *{new_name}* تغییر کرد.", parse_mode="Markdown")
+    show_models_list(cid)
+
+
+# ─── حذف مدل (مرحله اول: تأییدیه اولیه) ─────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdl_delete_"))
+def handle_mdl_delete(call):
+    if not is_admin(call.message.chat.id):
+        return
+    model_id = int(call.data.split("_")[-1])
+    cid = call.message.chat.id
+    item_count = db_count_model_items(model_id)
+    bot.answer_callback_query(call.id)
+
     markup = InlineKeyboardMarkup()
-    if item_count > 0:
-        # نمایش هشدار در صورت وجود آیتم
-        markup.add(InlineKeyboardButton(f"⚠️ بله، حذف شود ({item_count} آیتم حذف می‌شوند)", 
-                                             callback_data=f"confirm_model_del_{model_id}"))
-    else:
-        markup.add(InlineKeyboardButton("✅ تایید حذف", callback_data=f"confirm_model_del_{model_id}"))
-    
-    markup.add(InlineKeyboardButton("🔙 انصراف", callback_data="admin_models_list"))
-    
-    bot.edit_message_text(f"آیا از حذف این مدل اطمینان دارید؟\nتعداد آیتم‌های وابسته: {item_count}", 
-                          call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_model_del_"))
-def confirm_delete_model(call):
-    model_id = int(call.data.split("_")[3])
-    if db.delete_model(model_id):
-        bot.answer_callback_query(call.id, "✅ مدل با موفقیت حذف شد.")
-        admin_models_list(call.message) # بازگشت به لیست
+    if item_count > 0:
+        # هشدار وجود آیتم + تأییدیه دوم
+        text = (
+            f"⚠️ *هشدار!*\n\n"
+            f"این مدل دارای *{item_count} آیتم* است.\n"
+            f"با حذف مدل، تمام آیتم‌های آن نیز حذف خواهند شد.\n\n"
+            f"آیا مطمئن هستید؟"
+        )
+        markup.add(InlineKeyboardButton(
+            f"🗑️ بله، مدل و {item_count} آیتم حذف شوند",
+            callback_data=f"mdl_del_confirm_{model_id}"
+        ))
     else:
-        bot.answer_callback_query(call.id, "❌ خطا در حذف مدل.")
+        text = "❓ آیا از حذف این مدل مطمئن هستید؟"
+        markup.add(InlineKeyboardButton(
+            "✅ بله، حذف شود",
+            callback_data=f"mdl_del_confirm_{model_id}"
+        ))
+
+    markup.add(InlineKeyboardButton("❌ انصراف", callback_data="mdl_list"))
+    bot.edit_message_text(text, cid, call.message.message_id,
+                          parse_mode="Markdown", reply_markup=markup)
+
+
+# ─── حذف مدل (مرحله دوم: اجرای حذف) ─────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdl_del_confirm_"))
+def handle_mdl_del_confirm(call):
+    if not is_admin(call.message.chat.id):
+        return
+    model_id = int(call.data.split("_")[-1])
+    cid = call.message.chat.id
+
+    success = db_delete_model(model_id)
+    if success:
+        bot.answer_callback_query(call.id, "✅ مدل با موفقیت حذف شد.")
+    else:
+        bot.answer_callback_query(call.id, "❌ خطا در حذف مدل.", show_alert=True)
+
+    show_models_list(cid, call.message.message_id, edit=True)
+
+
+# ─── افزودن مدل جدید ─────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "mdl_add")
+def handle_mdl_add(call):
+    if not is_admin(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    admin_model_state[cid] = {"step": "add_name", "data": {}}
+    bot.answer_callback_query(call.id)
+    bot.send_message(cid, "📝 نام مدل جدید را وارد کنید:")
+
+
+@bot.message_handler(func=lambda m: admin_model_state.get(m.chat.id, {}).get("step") == "add_name")
+def handle_mdl_add_name_input(message):
+    if not is_admin(message.chat.id):
+        return
+    cid = message.chat.id
+    name = message.text.strip()
+
+    if not name:
+        bot.send_message(cid, "⚠️ نام نمی‌تواند خالی باشد.")
+        return
+
+    # ذخیره نام و پرسش درباره آیتم‌ها
+    admin_model_state[cid]["data"]["name"] = name
+    admin_model_state[cid]["step"] = "add_ask_items"
+
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("✅ بله، همین الان", callback_data="mdl_add_items_yes"),
+        InlineKeyboardButton("⏭ نه، بعداً",      callback_data="mdl_add_items_no"),
+    )
+    bot.send_message(
+        cid,
+        f"مدل *{name}* ثبت می‌شود.\n\n"
+        f"آیا می‌خواهید همین الان آیتم‌ها را هم اضافه کنید؟",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+
+# ─── جواب "نه، بعداً" ────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "mdl_add_items_no")
+def handle_mdl_add_items_no(call):
+    if not is_admin(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = admin_model_state.pop(cid, None)
+    if not state:
+        bot.answer_callback_query(call.id)
+        return
+
+    model_id = db_add_model(state["data"]["name"])
+    bot.answer_callback_query(call.id)
+    bot.delete_message(cid, call.message.message_id)
+    bot.send_message(
+        cid,
+        f"✅ مدل *{state['data']['name']}* ذخیره شد.\n"
+        f"برای افزودن آیتم از بخش «مدیریت آیتم‌ها» استفاده کن.",
+        parse_mode="Markdown"
+    )
+    show_models_list(cid)
+
+
+# ─── جواب "بله، همین الان" — شروع جمع‌آوری آیتم‌ها ──────────
+#   از همان فرمول save_model_state استفاده می‌کنیم
+#   ولی اینجا مدل از قبل در دیتابیس نیست؛ بعد از اتمام آیتم‌ها ذخیره می‌شه
+
+@bot.callback_query_handler(func=lambda c: c.data == "mdl_add_items_yes")
+def handle_mdl_add_items_yes(call):
+    if not is_admin(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = admin_model_state.get(cid)
+    if not state:
+        bot.answer_callback_query(call.id)
+        return
+
+    model_name = state["data"]["name"]
+    # انتقال به save_model_state با همان ساختار موجود
+    save_model_state[cid] = {
+        "step": "item_count",
+        "data": {
+            "model_name": model_name,
+            "items": [],
+            "current_item": 0,
+            "_from_admin_model": True,   # نشانه‌گذار برای بازگشت به لیست مدل‌ها
+        }
+    }
+    admin_model_state.pop(cid, None)
+
+    bot.answer_callback_query(call.id)
+    bot.delete_message(cid, call.message.message_id)
+    bot.send_message(cid, f"چند آیتم برای مدل *{model_name}* داری؟ (عدد وارد کن)",
+                     parse_mode="Markdown")
+
+
+# ─── تغییر رفتار save_model_state پس از ذخیره ───────────────
+#
+#  در تابع save_model_side_type که داخل main.py داری،
+#  بخش "else" (وقتی همه آیتم‌ها تموم می‌شن) رو به این شکل تغییر بده:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -585,24 +885,6 @@ def finance_history_activities(call):
                           parse_mode="Markdown", reply_markup=markup)
     bot.answer_callback_query(call.id)
 
-def admin_models_list(chat_id, message_id=None, edit=False):
-    conn = get_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id, name FROM models ORDER BY id")
-    models = cur.fetchall()
-    cur.close(); conn.close()
-
-    text = "🗂️ *مدیریت آیتم‌ها*\nیک مدل را انتخاب کنید:"
-    markup = InlineKeyboardMarkup()
-    for m in models:
-        markup.add(InlineKeyboardButton(m['name'], callback_data=f"admin_items_model_{m['id']}"))
-    markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel_back"))
-
-    if edit and message_id:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
 def admin_items_list(chat_id, model_id, message_id=None, edit=False):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
@@ -630,7 +912,7 @@ def admin_items_list(chat_id, model_id, message_id=None, edit=False):
         InlineKeyboardButton("➕ افزودن آیتم", callback_data=f"admin_item_add_{model_id}"),
         InlineKeyboardButton("🔙 بازگشت", callback_data="admin_items_back")
     )
-    markup.add(InlineKeyboardButton("🏗️ مدیریت مدل‌ها (دسته‌بندی‌ها)", callback_data="admin_models_list"))
+
     if edit and message_id:
         bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -862,9 +1144,6 @@ def _item_add_step(message):
             InlineKeyboardButton("تک طرف", callback_data="admin_item_side_single"),
         )
         bot.send_message(cid, "🔄 نوع طرف را انتخاب کنید:", reply_markup=markup)
-
-
-
 
 # ---------------------------------------- key boards ----------------------------------------
 
@@ -1301,7 +1580,6 @@ def handle_admin_user_delete_confirm(call):
 
     admin_users_list(cid)
 
-
 @bot.callback_query_handler(func=lambda c: c.data == "admin_users_list")
 def handle_admin_users_list(call):
     if not is_admin(call.message.chat.id):
@@ -1333,7 +1611,6 @@ def handle_admin_user_add(call):
     admin_add_user_state[call.message.chat.id] = {"step": "get_name", "data": {}}
     msg = bot.send_message(call.message.chat.id, "👤 نام کاربر را وارد کنید:")
     bot.register_next_step_handler(msg, _add_user_get_name)
-
 
 # --- منوی ویرایش: وقتی روی «ویرایش» کنار یک کاربر کلیک می‌شه ---
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_user_edit_"))
@@ -1405,7 +1682,6 @@ def handle_admin_user_delete(call):
         call.message.chat.id, call.message.message_id,
         reply_markup=markup
     )
-
 
 # ---------------------------------------- user callback handlers ----------------------------------------
 
@@ -1551,11 +1827,10 @@ def save_model_side_type(call):
     if data["current_item"] < data["item_count"]:
         state["step"] = "item_name"
         bot.send_message(cid, f"نام آیتم {data['current_item'] + 1}:")
+    
     else:
-        # ذخیره در دیتابیس
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(f"USE {DB_NAME}")
         cursor.execute("INSERT INTO models (name) VALUES (%s)", (data["model_name"],))
         model_id = cursor.lastrowid
         for item in data["items"]:
@@ -1565,8 +1840,26 @@ def save_model_side_type(call):
             )
         conn.commit()
         conn.close()
+
+        from_admin = data.get("_from_admin_model", False)   # ← خط جدید
         del save_model_state[cid]
-        bot.send_message(cid, f"✅ مدل '{data['model_name']}' با {data['item_count']} آیتم ذخیره شد.\n(قیمت‌گذاری توسط ادمین انجام می‌شود)", reply_markup=main_menu())
+
+        if from_admin:                                       # ← خط جدید
+            bot.send_message(                               # ← خط جدید
+                cid,                                        # ← خط جدید
+                f"✅ مدل '{data['model_name']}' با {data['item_count']} آیتم ذخیره شد.",
+                reply_markup=admin_menu()                   # ← خط جدید
+            )                                               # ← خط جدید
+            show_models_list(cid)                           # ← خط جدید
+        else:
+            bot.send_message(
+                cid,
+                f"✅ مدل '{data['model_name']}' با {data['item_count']} آیتم ذخیره شد.\n"
+                f"(قیمت‌گذاری توسط ادمین انجام می‌شود)",
+                reply_markup=main_menu()
+            )
+
+
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ord_model_"))
 def ord_select_model(call):
