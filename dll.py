@@ -138,8 +138,90 @@ def create_table_order_items():
     conn.close()
     print(f'table user created successfully')
 
+def create_table_payments():
+    conn = mysql.connector.connect(**database_config, database=DB_NAME)
+    cur = conn.cursor()
+    SQL_Query = """
+
+CREATE TABLE payments (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    user_id      INT NOT NULL,
+    amount       DECIMAL(15,0) NOT NULL,           -- مبلغ پرداختی (تومان)
+    receipt_file_id  VARCHAR(200) NOT NULL,         -- file_id تلگرام
+    receipt_path     VARCHAR(500) NOT NULL,         -- مسیر فیزیکی روی سرور
+    status       ENUM('pending','approved','rejected') DEFAULT 'pending',
+    note         TEXT,                -- توضیح ادمین هنگام رد
+    submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at  DATETIME,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+    """
+    cur.execute(SQL_Query)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f'table payments created successfully')
+
+def create_table_debts():
+    conn = mysql.connector.connect(**database_config, database=DB_NAME)
+    cur = conn.cursor()
+    SQL_Query = """
+CREATE TABLE debts (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    order_id     INT NOT NULL UNIQUE,
+    user_id      INT NOT NULL,
+    total_amount DECIMAL(15,0) NOT NULL,            -- مبلغ کل سفارش (تومان)
+    paid_amount  DECIMAL(15,0) DEFAULT 0,           -- جمع پرداخت‌های تایید شده
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (order_id) REFERENCES orders(id),
+    FOREIGN KEY (user_id)  REFERENCES users(id)
+);
 
 
+
+
+    """
+    cur.execute(SQL_Query)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f'table debts created successfully')
+
+def create_table_payment_debts():
+    conn = mysql.connector.connect(**database_config, database=DB_NAME)
+    cur = conn.cursor()
+    SQL_Query = """
+    CREATE TABLE payment_debts (
+    payment_id INT NOT NULL,
+    debt_id    INT NOT NULL,
+    PRIMARY KEY (payment_id, debt_id),
+    FOREIGN KEY (payment_id) REFERENCES payments(id),
+    FOREIGN KEY (debt_id)    REFERENCES debts(id)
+);
+    """
+    cur.execute(SQL_Query)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f'table payment debts created successfully')
+
+def create_table_admins():
+    conn = mysql.connector.connect(**database_config, database=DB_NAME)
+    cur = conn.cursor()
+    SQL_Query = """
+CREATE TABLE admins (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    user_id    INT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);"""
+
+ 
+    cur.execute(SQL_Query)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f'table admins created successfully')
 
 
 
@@ -151,3 +233,7 @@ if __name__ == "__main__":
     create_table_orders()
     create_table_order_items()
     create_table_order_files()
+    create_table_payments()
+    create_table_debts()
+    create_table_payment_debts()
+    create_table_admins()
