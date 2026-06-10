@@ -1109,42 +1109,6 @@ def _item_edit_step(message):
     bot.send_message(cid, "✅ ویرایش انجام شد.")
     admin_items_list(cid, row["model_id"])
 
-def _item_add_step(message):
-    cid = message.chat.id
-    state = admin_item_state.get(cid, {})
-    step = state.get("step")
-
-    if step == "add_name":
-        state["name"] = message.text.strip()
-        state["step"] = "add_price"
-        admin_item_state[cid] = state
-        bot.register_next_step_handler(
-            bot.send_message(cid, "💰 قیمت را وارد کنید (یا /skip برای خالی گذاشتن):"),
-            _item_add_step
-        )
-
-    elif step == "add_price":
-        if message.text.strip() == "/skip":
-            state["price"] = None
-        else:
-            try:
-                state["price"] = int(message.text.strip().replace(",", ""))
-            except ValueError:
-                bot.register_next_step_handler(
-                    bot.send_message(cid, "⚠️ قیمت باید عدد باشد. دوباره وارد کنید:"),
-                    _item_add_step
-                )
-                return
-        state["step"] = "add_side"
-        admin_item_state[cid] = state
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("بدون طرف", callback_data="admin_item_side_none"),
-            InlineKeyboardButton("دو طرف", callback_data="admin_item_side_both"),
-            InlineKeyboardButton("تک طرف", callback_data="admin_item_side_single"),
-        )
-        bot.send_message(cid, "🔄 نوع طرف را انتخاب کنید:", reply_markup=markup)
-
 # ---------------------------------------- key boards ----------------------------------------
 
 def main_menu():
@@ -1322,36 +1286,34 @@ def handle_admin_items_model(call):
     admin_items_list(call.message.chat.id, model_id, call.message.message_id, edit=True)
     bot.answer_callback_query(call.id)
 
+# @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_item_add_"))
+# def handle_admin_item_add(call):
+#     if not is_admin(call.message.chat.id):
+#         return
+#     model_id = int(call.data.split("_")[-1])
+#     cid = call.message.chat.id
+#     admin_item_state[cid] = {"step": "add_name", "model_id": model_id}
+#     bot.send_message(cid, "📝 نام آیتم جدید را وارد کنید:")
+#     bot.answer_callback_query(call.id)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_item_add_"))
-def handle_admin_item_add(call):
-    if not is_admin(call.message.chat.id):
-        return
+def handle_admin_item_add_start(call):
+    if not is_admin(call.message.chat.id): return
+    
     model_id = int(call.data.split("_")[-1])
-    cid = call.message.chat.id
-    admin_item_state[cid] = {"step": "add_name", "model_id": model_id}
-    bot.send_message(cid, "📝 نام آیتم جدید را وارد کنید:")
+    admin_item_state[call.message.chat.id] = {
+        'model_id': model_id,
+        'step': 'wait_name',
+        'data': {}
+    }
+    
+    bot.edit_message_text(
+        "📝 لطفا **نام آیتم** جدید را وارد کنید:",
+        call.message.chat.id, call.message.message_id,
+        parse_mode="Markdown"
+    )
     bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_item_side_"))
-def handle_admin_item_side(call):
-    cid = call.message.chat.id
-    state = admin_item_state.get(cid, {})
-    if state.get("step") != "add_side":
-        bot.answer_callback_query(call.id)
-        return
-
-    side = call.data.split("_")[-1]  # none / both / single
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO model_items (model_id, name, price, side_type) VALUES (%s,%s,%s,%s)",
-        (state["model_id"], state["name"], state.get("price"), side)
-    )
-    conn.commit(); cur.close(); conn.close()
-    admin_item_state.pop(cid, None)
-
-    bot.answer_callback_query(call.id, "✅ آیتم افزوده شد")
-    admin_items_list(cid, state["model_id"], call.message.message_id, edit=True)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin_item_edit_"))
 def handle_admin_item_edit(call):
@@ -1473,24 +1435,6 @@ def admin_items_menu(message):
     
     # نمایش لیست مدل‌ها برای شروع مدیریت
     admin_models_list(message.chat.id)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_item_add_"))
-def handle_admin_item_add_start(call):
-    if not is_admin(call.message.chat.id): return
-    
-    model_id = int(call.data.split("_")[-1])
-    admin_item_state[call.message.chat.id] = {
-        'model_id': model_id,
-        'step': 'wait_name',
-        'data': {}
-    }
-    
-    bot.edit_message_text(
-        "📝 لطفا **نام آیتم** جدید را وارد کنید:",
-        call.message.chat.id, call.message.message_id,
-        parse_mode="Markdown"
-    )
-    bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_item_state)
 def process_admin_item_steps(message):
@@ -1858,8 +1802,6 @@ def save_model_side_type(call):
                 f"(قیمت‌گذاری توسط ادمین انجام می‌شود)",
                 reply_markup=main_menu()
             )
-
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ord_model_"))
 def ord_select_model(call):
