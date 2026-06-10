@@ -76,22 +76,22 @@ def create_table_orders():
     cur = conn.cursor()
     SQL_Query = """
     CREATE TABLE orders (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    user_id    INT NOT NULL,
-    status     ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
-    notes      TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    user_id       INT NOT NULL,
+    fabric_name   VARCHAR(200) NOT NULL,
+    customer_name VARCHAR(100) NOT NULL,
+    delivery_date DATE NOT NULL,
+    status        ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
+    notes         TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-
-
+    );
     """
     cur.execute(SQL_Query)
     conn.commit()
     cur.close()
     conn.close()
-    print(f'table user created successfully')
+    print('table orders created successfully')
 
 def create_table_order_files():
     conn = mysql.connector.connect(**database_config, database=DB_NAME)

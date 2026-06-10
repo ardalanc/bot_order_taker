@@ -438,7 +438,9 @@ def admin_orders_list(chat_id, message_id, status="pending", edit=False):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
-        SELECT o.id, o.created_at, o.notes, u.name, u.phone
+        SELECT o.id, o.created_at, o.notes,
+               o.fabric_name, o.customer_name, o.delivery_date,
+               u.name, u.phone
         FROM orders o JOIN users u ON o.user_id = u.id
         WHERE o.status = %s
         ORDER BY o.created_at DESC LIMIT 20
@@ -450,34 +452,37 @@ def admin_orders_list(chat_id, message_id, status="pending", edit=False):
     status_fa = {
         'pending': '🕐 در انتظار', 'confirmed': '✅ تأیید شده',
         'in_progress': '🔧 در حال انجام', 'delivered': '📦 تحویل داده شده',
-        'cancelled': '❌ لغو شده',}
+        'cancelled': '❌ لغو شده',
+    }
 
     if not orders:
         text = f"هیچ سفارشی با وضعیت *{status_fa[status]}* وجود ندارد."
     else:
         lines = [f"📋 سفارشات *{status_fa[status]}* ({len(orders)} عدد):\n"]
         for o in orders:
-            note = f" — {o['notes']}" if o['notes'] else ""
-            lines.append(f"• #{o['id']} | {o['name']} | {str(o['created_at'])[:10]}{note}")
+            lines.append(
+                f"• #{o['id']} | {o['name']} | {str(o['created_at'])[:10]}\n"
+                f"  🧵 {o['fabric_name']} | 👥 {o['customer_name']} | 📅 {o['delivery_date']}"
+            )
         text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup(row_width=3)
-    # فیلتر وضعیت‌ها
     markup.add(
-        InlineKeyboardButton("🕐 در انتظار", callback_data="admin_orders_pending"),
-        InlineKeyboardButton("✅ تأیید شده", callback_data="admin_orders_confirmed"),
-        InlineKeyboardButton("🔧 در حال انجام", callback_data="admin_orders_in_progress"),
-        InlineKeyboardButton("📦 تحویل داده شده", callback_data="admin_orders_delivered"),
-        InlineKeyboardButton("❌ لغو شده", callback_data="admin_orders_cancelled"),
+        InlineKeyboardButton("🕐 در انتظار",       callback_data="admin_orders_pending"),
+        InlineKeyboardButton("✅ تأیید شده",        callback_data="admin_orders_confirmed"),
+        InlineKeyboardButton("🔧 در حال انجام",    callback_data="admin_orders_in_progress"),
+        InlineKeyboardButton("📦 تحویل داده شده",  callback_data="admin_orders_delivered"),
+        InlineKeyboardButton("❌ لغو شده",          callback_data="admin_orders_cancelled"),
     )
     for o in orders:
         markup.add(InlineKeyboardButton(
-            f"🔍 #{o['id']} — {o['name']}",
+            f"🔍 #{o['id']} — {o['fabric_name']} | {o['customer_name']}",
             callback_data=f"admin_order_detail_{o['id']}"
         ))
 
     if edit:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text(text, chat_id, message_id,
+                              parse_mode="Markdown", reply_markup=markup)
     else:
         bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
@@ -576,7 +581,7 @@ def orders_filter_activities(call):
     conn = mysql.connector.connect(**database_config, database=DB_NAME)
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
-        SELECT o.id, o.created_at, o.notes
+        SELECT o.id, o.created_at, o.notes, o.fabric_name, o.customer_name, o.delivery_date
         FROM orders o
         JOIN users u ON o.user_id = u.id
         WHERE u.chat_id = %s AND o.status = %s
@@ -585,31 +590,33 @@ def orders_filter_activities(call):
     orders = cursor.fetchall()
     cursor.close()
     conn.close()
-    
+
     status_fa = {
         'pending': '🕐 در انتظار', 'confirmed': '✅ تأیید شده',
         'in_progress': '🔧 در حال انجام', 'delivered': '📦 تحویل داده شده',
         'cancelled': '❌ لغو شده',
     }
-    
+
     if not orders:
         text = f"هیچ سفارشی با وضعیت *{status_fa[status]}* یافت نشد."
     else:
         lines = [f"📋 سفارشات *{status_fa[status]}*:\n"]
         for o in orders:
-            notes = f" — {o['notes']}" if o['notes'] else ""
-            lines.append(f"• سفارش #{o['id']} | {str(o['created_at'])[:10]}{notes}")
+            notes = f" | {o['notes']}" if o['notes'] else ""
+            lines.append(
+                f"• سفارش #{o['id']} | {str(o['created_at'])[:10]}\n"
+                f"  🧵 {o['fabric_name']} | 👥 {o['customer_name']} | 📅 {o['delivery_date']}{notes}"
+            )
         text = "\n".join(lines)
-    
+
     markup = InlineKeyboardMarkup()
     for o in orders:
         markup.add(InlineKeyboardButton(
-            f"🔍 جزئیات سفارش #{o['id']}",
+            f"🔍 #{o['id']} — {o['fabric_name']} | {o['customer_name']}",
             callback_data=f"order_detail_{o['id']}"
         ))
     markup.add(InlineKeyboardButton("🔙 بازگشت به سفارشات", callback_data="orders"))
 
-    
     bot.edit_message_text(text, chat_id, call.message.message_id,
                           parse_mode="Markdown", reply_markup=markup)
     bot.answer_callback_query(call.id)
@@ -729,49 +736,61 @@ def _finalize_order(cid):
     data = state["data"]
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(f"USE {DB_NAME}")
 
-    # پیدا کردن user_id
     cursor.execute("SELECT id FROM users WHERE chat_id=%s", (cid,))
     row = cursor.fetchone()
-    
     if not row:
         bot.send_message(cid, "ابتدا /start را بزنید.")
         conn.close()
         return
     user_id = row[0]
 
-    # ثبت سفارش
     notes = data.get("notes")
-    cursor.execute("INSERT INTO orders (user_id, notes) VALUES (%s,%s)", (user_id, notes))
+    cursor.execute(
+        """INSERT INTO orders (user_id, fabric_name, customer_name, delivery_date, notes)
+           VALUES (%s, %s, %s, %s, %s)""",
+        (user_id, data["fabric_name"], data["customer_name"], data["delivery_date"], notes)
+    )
     order_id = cursor.lastrowid
 
-    # ثبت آیتم‌ها
     for iid in data["selected_items"]:
         cursor.execute("SELECT price FROM model_items WHERE id=%s", (iid,))
         price_row = cursor.fetchone()
         unit_price = price_row[0] if price_row and price_row[0] else 0
         cursor.execute(
-            "INSERT INTO order_items (order_id, model_item_id, quantity, unit_price, hand_side) VALUES (%s,%s,%s,%s,%s)",
-            (order_id, iid, data["quantities"][iid], unit_price, data["hand_sides"].get(iid, "none"))
+            """INSERT INTO order_items
+               (order_id, model_item_id, quantity, unit_price, hand_side)
+               VALUES (%s,%s,%s,%s,%s)""",
+            (order_id, iid, data["quantities"][iid], unit_price,
+             data["hand_sides"].get(iid, "none"))
         )
 
     conn.commit()
     cursor.execute("SELECT name, phone FROM users WHERE id=%s", (user_id,))
     urow = cursor.fetchone()
-    uname = urow[0] if urow else "نامشخص"
+    uname  = urow[0] if urow else "نامشخص"
     uphone = urow[1] if urow else "—"
-
     conn.close()
+
     notify_admins(
         f"🔔 *سفارش جدید ثبت شد*\n"
         f"شماره سفارش: #{order_id}\n"
-        f"کاربر: {uname} | {uphone}\n"
+        f"👤 ثبت‌کننده: {uname} | {uphone}\n"
+        f"🧵 پارچه: {data['fabric_name']}\n"
+        f"👥 مشتری: {data['customer_name']}\n"
+        f"📅 تاریخ تحویل: {data['delivery_date']}\n"
         f"chat_id: `{cid}`"
     )
 
     del order_reg_state[cid]
-    bot.send_message(cid, f"✅ سفارش #{order_id} با موفقیت ثبت شد.", reply_markup=main_menu())
+    bot.send_message(
+        cid,
+        f"✅ سفارش #{order_id} با موفقیت ثبت شد.\n"
+        f"🧵 پارچه: {data['fabric_name']}\n"
+        f"👥 مشتری: {data['customer_name']}\n"
+        f"📅 تحویل: {data['delivery_date']}",
+        reply_markup=main_menu()
+    )
 
 def order_registration(message):
     cid = message.chat.id
@@ -789,8 +808,25 @@ def order_registration(message):
     markup = InlineKeyboardMarkup()
     for mid, mname in models:
         markup.add(InlineKeyboardButton(mname, callback_data=f"ord_model_{mid}"))
-    order_reg_state[cid] = {"step": "select_model", "data": {"items": []}}
-    bot.send_message(cid, "مدل مورد نظر را انتخاب کنید:", reply_markup=markup)
+    order_reg_state[cid] = {"step": "enter_fabric", "data": {"items": []}}        
+    bot.send_message(cid, "🧵 نام و کد پارچه را وارد کنید:",parse_mode="Markdown")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def finance_activities(call):
     chat_id = call.message.chat.id
@@ -925,9 +961,11 @@ def order_detail_activities(call):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
-        SELECT o.id, o.status, o.notes, o.created_at
+        SELECT o.id, o.status, o.notes, o.created_at,
+               o.fabric_name, o.customer_name, o.delivery_date
         FROM orders o JOIN users u ON o.user_id = u.id
-        WHERE o.id = %s AND u.chat_id = %s""", (order_id, chat_id))
+        WHERE o.id = %s AND u.chat_id = %s
+    """, (order_id, chat_id))
     order = cursor.fetchone()
 
     if not order:
@@ -955,10 +993,13 @@ def order_detail_activities(call):
     lines = [
         f"📦 *جزئیات سفارش #{order_id}*",
         f"وضعیت: {status_fa.get(order['status'], order['status'])}",
-        f"تاریخ: {str(order['created_at'])[:10]}",
+        f"🧵 پارچه: {order['fabric_name']}",
+        f"👥 مشتری: {order['customer_name']}",
+        f"📅 تاریخ تحویل: {order['delivery_date']}",
+        f"🗓 تاریخ ثبت: {str(order['created_at'])[:10]}",
     ]
     if order['notes']:
-        lines.append(f"توضیحات: {order['notes']}")
+        lines.append(f"📝 یادداشت: {order['notes']}")
 
     if items:
         lines.append("\n🧾 *اقلام سفارش:*")
@@ -981,7 +1022,8 @@ def order_detail_activities(call):
         lines.append("\n_(آیتمی ثبت نشده)_")
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"orders_filter_{order['status']}"))
+    markup.add(InlineKeyboardButton("🔙 بازگشت",
+                                    callback_data=f"orders_filter_{order['status']}"))
     bot.edit_message_text("\n".join(lines), chat_id, call.message.message_id,
                           parse_mode="Markdown", reply_markup=markup)
     bot.answer_callback_query(call.id)
@@ -1269,6 +1311,94 @@ def ord_enter_notes(message):
     cid = message.chat.id
     order_reg_state[cid]["data"]["notes"] = message.text
     _finalize_order(cid)
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_fabric"
+)
+def ord_enter_fabric(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    fabric = message.text.strip()
+    if not fabric:
+        bot.send_message(cid, "⚠️ نام پارچه نمی‌تواند خالی باشد:")
+        return
+    order_reg_state[cid]["data"]["fabric_name"] = fabric
+    order_reg_state[cid]["step"] = "enter_customer"
+    bot.send_message(cid, "👤 نام مشتری را وارد کنید:")
+
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_customer"
+)
+def ord_enter_customer(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    customer = message.text.strip()
+    if not customer:
+        bot.send_message(cid, "⚠️ نام مشتری نمی‌تواند خالی باشد:")
+        return
+    order_reg_state[cid]["data"]["customer_name"] = customer
+    order_reg_state[cid]["step"] = "enter_delivery"
+    bot.send_message(
+        cid,
+        "📅 تاریخ تحویل را وارد کنید:\n_(فرمت: YYYY/MM/DD  مثال: ۱۴۰۴/۰۵/۲۰)_",
+        parse_mode="Markdown"
+    )
+
+
+@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_delivery")
+def ord_enter_delivery(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    raw = message.text.strip().replace("\\", "/").replace(".", "/")
+
+    # تبدیل اعداد فارسی به انگلیسی
+    fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+    raw = raw.translate(fa_digits)
+
+    parts = raw.split("/")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        bot.send_message(cid, "⚠️ فرمت تاریخ درست نیست. لطفاً به شکل YYYY/MM/DD وارد کنید:")
+        return
+
+    year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+
+    # اگر سال شمسی وارد شده (مثلاً ۱۴۰۴) به میلادی تبدیل کن
+    if year > 1500:
+        # تبدیل ساده شمسی به میلادی (تقریبی برای ذخیره در DATE)
+        year = year - 1279  # 1404 → 2025 (تقریب)
+
+    try:
+        import datetime
+        delivery_date = datetime.date(year, month, day)
+    except ValueError:
+        bot.send_message(cid, "⚠️ تاریخ معتبر نیست. دوباره وارد کنید:")
+        return
+
+    order_reg_state[cid]["data"]["delivery_date"] = str(delivery_date)
+    order_reg_state[cid]["step"] = "select_model"
+
+    # حالا انتخاب مدل
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM models")
+    models = cursor.fetchall()
+    conn.close()
+
+    if not models:
+        bot.send_message(cid, "هیچ مدلی ثبت نشده است.")
+        del order_reg_state[cid]
+        return
+
+    markup = InlineKeyboardMarkup()
+    for mid, mname in models:
+        markup.add(InlineKeyboardButton(mname, callback_data=f"ord_model_{mid}"))
+    bot.send_message(cid, "🏗️ مدل مورد نظر را انتخاب کنید:", reply_markup=markup)
+
+
 # ─── Admin Items Management ───────────────────────────────────────────────────
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_items_back")
@@ -1928,17 +2058,15 @@ def handle_admin_order_detail(call):
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
-
-    # اطلاعات سفارش + کاربر
     cursor.execute("""
         SELECT o.id, o.status, o.notes, o.created_at,
+               o.fabric_name, o.customer_name, o.delivery_date,
                u.name, u.phone, u.chat_id AS user_chat_id
         FROM orders o JOIN users u ON o.user_id = u.id
         WHERE o.id = %s
     """, (order_id,))
     order = cursor.fetchone()
 
-    # آیتم‌ها
     cursor.execute("""
         SELECT mi.name, oi.quantity, oi.unit_price, oi.hand_side
         FROM order_items oi JOIN model_items mi ON oi.model_item_id = mi.id
@@ -1946,10 +2074,8 @@ def handle_admin_order_detail(call):
     """, (order_id,))
     items = cursor.fetchall()
 
-    # فایل‌های ضمیمه
     cursor.execute("SELECT file_id FROM order_files WHERE order_id = %s", (order_id,))
     files = cursor.fetchall()
-
     cursor.close()
     conn.close()
 
@@ -1967,8 +2093,11 @@ def handle_admin_order_detail(call):
     lines = [
         f"📦 *جزئیات سفارش #{order_id}*",
         f"وضعیت: {status_fa.get(order['status'], order['status'])}",
-        f"تاریخ: {str(order['created_at'])[:16]}",
-        f"\n👤 *کاربر:* {order['name']} | {order['phone']}",
+        f"🗓 تاریخ ثبت: {str(order['created_at'])[:16]}",
+        f"\n🧵 *پارچه:* {order['fabric_name']}",
+        f"👥 *مشتری:* {order['customer_name']}",
+        f"📅 *تاریخ تحویل:* {order['delivery_date']}",
+        f"\n👤 *ثبت‌کننده:* {order['name']} | {order['phone']}",
         f"chat_id: `{order['user_chat_id']}`",
     ]
 
@@ -1987,13 +2116,11 @@ def handle_admin_order_detail(call):
                 f" | {int(it['unit_price']):,} تومان{side}"
                 f"\n  جمع: {subtotal:,} تومان"
             )
-            lines.append(f"\n💰 *مجموع: {total:,} تومان*")
+        lines.append(f"\n💰 *مجموع: {total:,} تومان*")
 
     if files:
         lines.append(f"\n📎 فایل‌های ضمیمه: {len(files)} عدد")
 
-    # دکمه‌های تغییر وضعیت
-    markup = InlineKeyboardMarkup(row_width=2)
     next_statuses = {
         'pending':     [('✅ تأیید', 'confirmed'), ('❌ لغو', 'cancelled')],
         'confirmed':   [('🔧 شروع', 'in_progress'), ('❌ لغو', 'cancelled')],
@@ -2001,6 +2128,7 @@ def handle_admin_order_detail(call):
         'delivered':   [],
         'cancelled':   [],
     }
+    markup = InlineKeyboardMarkup(row_width=2)
     for label, new_status in next_statuses.get(order['status'], []):
         markup.add(InlineKeyboardButton(
             label, callback_data=f"admin_set_status_{order_id}_{new_status}"
@@ -2012,11 +2140,10 @@ def handle_admin_order_detail(call):
     bot.edit_message_text("\n".join(lines), chat_id, call.message.message_id,
                           parse_mode="Markdown", reply_markup=markup)
 
-    # ارسال فایل‌ها به صورت جداگانه
     for f in files:
         try:
             bot.send_document(chat_id, f['file_id'])
-        except:
+        except Exception:
             pass
 
     bot.answer_callback_query(call.id)
