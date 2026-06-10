@@ -1157,7 +1157,6 @@ def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(
         KeyboardButton(texts["ORDER_REGISTRATION"]),
-        KeyboardButton(texts["SAVE_MODEL"])
     )
     markup.add(
         KeyboardButton(texts["MORE"])
@@ -1229,14 +1228,6 @@ def handle_order_registration(message):
         return
     order_registration(message)
 
-@bot.message_handler(func=lambda message: message.text == texts["SAVE_MODEL"])
-def handle_save_model(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    save_model_state[cid] = {"step": "model_name", "data": {}}
-    bot.send_message(cid, "نام مدل را وارد کنید:")
-
 @bot.message_handler(func=lambda message: message.text == texts["MORE"])
 def handle_more(message):
     if not is_registered(message.chat.id):
@@ -1250,46 +1241,6 @@ def handle_admin_users(message):
     bot.send_message(message.chat.id, "👥 مدیریت کاربران:", reply_markup=admin_users_menu())
 
 # ------------------------------------------------------------------------------------------------
-
-@bot.message_handler(func=lambda m: m.chat.id in save_model_state)
-def save_model_steps(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    state = save_model_state[cid]
-    step = state["step"]
-    data = state["data"]
-
-    if step == "model_name":
-        data["model_name"] = message.text
-        data["items"] = []
-        data["current_item"] = 0
-        state["step"] = "item_count"
-        bot.send_message(cid, "چند آیتم دارد؟ (عدد وارد کنید)")
-
-    elif step == "item_count":
-        if not message.text.isdigit() or int(message.text) < 1:
-            bot.send_message(cid, "عدد معتبر وارد کنید:")
-            return
-        data["item_count"] = int(message.text)
-        state["step"] = "item_name"
-        bot.send_message(cid, f"نام آیتم ۱:")
-
-    elif step == "item_name":
-        idx = data["current_item"]
-        data["items"].append({"name": message.text})
-        # انتخاب side_type
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("بدون طرف", callback_data=f"st_none_{cid}"),
-            InlineKeyboardButton("چپ و راست", callback_data=f"st_both_{cid}"),
-            InlineKeyboardButton("تک‌طرفه", callback_data=f"st_single_{cid}"),
-        )
-        bot.send_message(cid, f"نوع آیتم '{message.text}':", reply_markup=markup)
-        state["step"] = "item_side"
-
-    elif step == "done":
-        pass  # در callback هندل می‌شه
 
 @bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_qty")
 def ord_enter_qty(message):
@@ -1880,58 +1831,6 @@ def ord_select_side(call):
     bot.delete_message(cid, call.message.message_id)
     bot.answer_callback_query(call.id)
     _ask_next_side(cid)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("st_"))
-def save_model_side_type(call):
-    if not is_registered(call.message.chat.id):
-        return
-    parts = call.data.split("_")
-    side = parts[1]   # none / both / single
-    cid = int(parts[2])
-    state = save_model_state.get(cid)
-    if not state:
-        return
-    data = state["data"]
-    data["items"][-1]["side_type"] = side
-    data["current_item"] += 1
-
-    bot.answer_callback_query(call.id)
-    bot.delete_message(cid, call.message.message_id)
-
-    if data["current_item"] < data["item_count"]:
-        state["step"] = "item_name"
-        bot.send_message(cid, f"نام آیتم {data['current_item'] + 1}:")
-    
-    else:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO models (name) VALUES (%s)", (data["model_name"],))
-        model_id = cursor.lastrowid
-        for item in data["items"]:
-            cursor.execute(
-                "INSERT INTO model_items (model_id, name, side_type) VALUES (%s, %s, %s)",
-                (model_id, item["name"], item["side_type"])
-            )
-        conn.commit()
-        conn.close()
-
-        from_admin = data.get("_from_admin_model", False)   # ← خط جدید
-        del save_model_state[cid]
-
-        if from_admin:                                       # ← خط جدید
-            bot.send_message(                               # ← خط جدید
-                cid,                                        # ← خط جدید
-                f"✅ مدل '{data['model_name']}' با {data['item_count']} آیتم ذخیره شد.",
-                reply_markup=admin_menu()                   # ← خط جدید
-            )                                               # ← خط جدید
-            show_models_list(cid)                           # ← خط جدید
-        else:
-            bot.send_message(
-                cid,
-                f"✅ مدل '{data['model_name']}' با {data['item_count']} آیتم ذخیره شد.\n"
-                f"(قیمت‌گذاری توسط ادمین انجام می‌شود)",
-                reply_markup=main_menu()
-            )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ord_model_"))
 def ord_select_model(call):
