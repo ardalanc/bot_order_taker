@@ -76,14 +76,15 @@ def create_table_orders():
     cur = conn.cursor()
     SQL_Query = """
     CREATE TABLE orders (
-    id            INT AUTO_INCREMENT PRIMARY KEY,
-    user_id       INT NOT NULL,
-    fabric_name   VARCHAR(200) NOT NULL,
-    customer_name VARCHAR(100) NOT NULL,
-    delivery_date DATE NOT NULL,
-    status        ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
-    notes         TEXT,
-    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id             INT AUTO_INCREMENT PRIMARY KEY,
+    user_id        INT NOT NULL,
+    fabric_name    VARCHAR(200) NOT NULL,
+    customer_name  VARCHAR(100) NOT NULL,
+    delivery_date  DATE NOT NULL,
+    invoice_number VARCHAR(100) NULL,
+    status         ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
+    notes          TEXT,
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
     );
     """
