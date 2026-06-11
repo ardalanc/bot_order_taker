@@ -58,7 +58,7 @@ def create_table_model_items():
     id       INT AUTO_INCREMENT PRIMARY KEY,
     model_id INT NOT NULL,
     name     VARCHAR(100) NOT NULL,
-    price    DECIMAL(12,0) NULL,
+    price    DECIMAL(15,0) NULL,
     side_type ENUM('none','both','single') DEFAULT 'none',
     FOREIGN KEY (model_id) REFERENCES models(id)
 );
@@ -78,10 +78,10 @@ def create_table_orders():
     CREATE TABLE orders (
     id             INT AUTO_INCREMENT PRIMARY KEY,
     user_id        INT NOT NULL,
-    fabric_name    VARCHAR(200) NOT NULL,
-    customer_name  VARCHAR(100) NOT NULL,
-    delivery_date  DATE NOT NULL,
     invoice_number VARCHAR(100) NULL,
+    customer_name  VARCHAR(100) NULL,
+    delivery_date  date  NULL,
+    fabric         VARCHAR(200) NULL,
     status         ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
     notes          TEXT,
     created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,

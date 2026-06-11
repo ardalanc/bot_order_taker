@@ -1,3 +1,5 @@
+
+
 import telebot
 import mysql.connector
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,12 +12,785 @@ telebot.apihelper.API_URL="http://tapi.bale.ai/bot{0}/{1}"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-order_reg_state = {}  
 save_model_state = {}   
 admin_add_user_state = {}  
 admin_edit_user_state = {}  
 admin_item_state = {} 
 admin_model_state = {}
+
+
+
+
+
+
+
+
+
+# ==================================================================================
+#  ثبت سفارش — order_registration.py
+#  این فایل را در main.py ایمپورت کن یا محتوایش را در جای مناسب paste کن.
+#
+#  وابستگی‌های لازم که باید در main.py موجود باشند:
+#    bot, get_connection, is_registered, notify_admins
+#    InlineKeyboardMarkup, InlineKeyboardButton
+#    main_menu (تابع برگرداننده ReplyKeyboardMarkup کاربر عادی)
+# ==================================================================================
+
+# ─── State dictionary ────────────────────────────────────────────────────────────
+#
+#  ساختار order_reg_state[cid]:
+#  {
+#    "step": str,          # مرحله فعلی
+#    "data": {
+#      "model_id":        int,
+#      "model_name":      str,
+#      "selected_items":  {item_id: {"name":str, "price":int, "side_type":str}},
+#      "qty_queue":       [item_id, ...],   # صف آیتم‌هایی که باید تعداد گرفته شود
+#      "quantities":      {item_id: int},
+#      "side_queue":      [item_id, ...],   # صف آیتم‌های single که باید طرف گرفته شود
+#      "sides":           {item_id: str},   # 'left' | 'right'
+#      "invoice_number":  str | None,
+#      "customer_name":   str | None,
+#      "delivery_date":   str | None,
+#      "fabric":          str | None,
+#      "notes":           str | None,
+#    }
+#  }
+#
+#  مراحل (step):
+#    select_model → select_items → enter_qty → ask_side →
+#    invoice_number → customer_name → delivery_date → fabric → notes → confirm
+# ─────────────────────────────────────────────────────────────────────────────────
+
+order_reg_state = {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+#  توابع کمکی داخلی
+# ══════════════════════════════════════════════════════════════════════════════════
+
+def _get_user_id_by_chat(chat_id):
+    """id داخلی جدول users را از chat_id برمی‌گرداند."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE chat_id = %s", (chat_id,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    return row[0] if row else None
+
+
+def _ask_qty(cid):
+    """از کاربر تعداد اولین آیتم در صف qty_queue می‌پرسد."""
+    state = order_reg_state[cid]
+    queue = state["data"]["qty_queue"]
+    if not queue:
+        # صف خالی → برو به مرحله طرف (side)
+        _start_side_phase(cid)
+        return
+    item_id = queue[0]
+    item_name = state["data"]["selected_items"][item_id]["name"]
+    bot.send_message(
+        cid,
+        f"🔢 تعداد *{item_name}* را وارد کنید:\n_(برای لغو کل فرایند: /cancel)_",
+        parse_mode="Markdown"
+    )
+    state["step"] = "enter_qty"
+
+
+def _start_side_phase(cid):
+    """صف آیتم‌های single را می‌سازد و اولین سوال طرف را می‌پرسد."""
+    state = order_reg_state[cid]
+    single_ids = [
+        iid for iid, info in state["data"]["selected_items"].items()
+        if info["side_type"] == "single"
+    ]
+    state["data"]["side_queue"] = single_ids
+    state["data"]["sides"] = {}
+    _ask_side(cid)
+
+
+def _ask_side(cid):
+    """از کاربر طرف دسته برای اولین آیتم single در صف می‌پرسد."""
+    state = order_reg_state[cid]
+    queue = state["data"]["side_queue"]
+    if not queue:
+        # هیچ آیتم single ای نداریم → برو به مرحله شماره فاکتور
+        state["step"] = "invoice_number"
+        _ask_invoice(cid)
+        return
+    item_id = queue[0]
+    item_name = state["data"]["selected_items"][item_id]["name"]
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("⬅️ چپ",  callback_data=f"ord_side_left_{item_id}"),
+        InlineKeyboardButton("راست ➡️", callback_data=f"ord_side_right_{item_id}"),
+    )
+    bot.send_message(
+        cid,
+        f"↔️ طرف دسته *{item_name}* را انتخاب کنید:",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    state["step"] = "ask_side"
+
+
+def _ask_invoice(cid):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⏭ رد شدن (/skip)", callback_data="ord_skip_invoice"))
+    bot.send_message(
+        cid,
+        "🧾 شماره فاکتور را وارد کنید:\n_(اختیاری — برای رد شدن روی دکمه زیر بزنید یا /skip بنویسید)_",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    order_reg_state[cid]["step"] = "invoice_number"
+
+
+def _ask_customer(cid):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⏭ رد شدن (/skip)", callback_data="ord_skip_customer"))
+    bot.send_message(
+        cid,
+        "👥 نام مشتری را وارد کنید:\n_(اختیاری — برای رد شدن روی دکمه زیر بزنید یا /skip بنویسید)_",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    order_reg_state[cid]["step"] = "customer_name"
+
+
+def _ask_delivery(cid):
+    bot.send_message(
+        cid,
+        "📅 تاریخ تحویل را وارد کنید:\n_مثال: 1404/03/15_",
+        parse_mode="Markdown"
+    )
+    order_reg_state[cid]["step"] = "delivery_date"
+
+
+def _ask_fabric(cid):
+    bot.send_message(
+        cid,
+        "🧵 نوع پارچه را وارد کنید:",
+        parse_mode="Markdown"
+    )
+    order_reg_state[cid]["step"] = "fabric"
+
+
+def _ask_notes(cid):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⏭ رد شدن (/skip)", callback_data="ord_skip_notes"))
+    bot.send_message(
+        cid,
+        "📝 توضیحات اضافه (اختیاری):\n_(برای رد شدن روی دکمه زیر بزنید یا /skip بنویسید)_",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    order_reg_state[cid]["step"] = "notes"
+
+
+def _show_confirm(cid):
+    """خلاصه سفارش را نشان می‌دهد و دکمه تأیید/لغو می‌گذارد."""
+    state = order_reg_state[cid]
+    d = state["data"]
+    hand_fa = {"left": "چپ ⬅️", "right": "راست ➡️", "none": "—"}
+    side_label = {"none": "—", "both": "دو طرف", "single": "تک‌طرف"}
+
+    lines = ["📋 *خلاصه سفارش — لطفاً تأیید کنید:*\n"]
+    lines.append(f"🏷 مدل: *{d['model_name']}*")
+
+    total = 0
+    lines.append("\n🧾 *اقلام:*")
+    for iid, info in d["selected_items"].items():
+        qty = d["quantities"].get(iid, 1)
+        price = info["price"] or 0
+        subtotal = qty * price
+        total += subtotal
+
+        side_type = info["side_type"]
+        if side_type == "single":
+            hand = hand_fa.get(d["sides"].get(iid, "none"), "—")
+            side_str = f" | طرف: {hand}"
+        elif side_type == "both":
+            side_str = " | طرف: چپ و راست"
+        else:
+            side_str = ""
+
+        price_str = f" | {price:,} تومان" if price else ""
+        lines.append(f"• {info['name']} × {qty}{price_str}{side_str}")
+        if price:
+            lines.append(f"  جمع: {subtotal:,} تومان")
+
+    if total:
+        lines.append(f"\n💰 *مجموع: {total:,} تومان*")
+
+    lines.append(f"\n🧾 شماره فاکتور: {d['invoice_number'] or '—'}")
+    lines.append(f"👥 مشتری: {d['customer_name'] or '—'}")
+    lines.append(f"📅 تاریخ تحویل: {d['delivery_date'] or '—'}")
+    lines.append(f"🧵 پارچه: {d['fabric'] or '—'}")
+    lines.append(f"📝 توضیحات: {d['notes'] or '—'}")
+
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("✅ تأیید و ثبت سفارش", callback_data="ord_confirm"),
+        InlineKeyboardButton("❌ لغو",                callback_data="ord_cancel"),
+    )
+
+    bot.send_message(cid, "\n".join(lines), parse_mode="Markdown", reply_markup=markup)
+    order_reg_state[cid]["step"] = "confirm"
+
+
+def _finalize_order(cid):
+    """سفارش را در دیتابیس ذخیره می‌کند و نوتیف به ادمین می‌فرستد."""
+    state = order_reg_state.pop(cid, None)
+    if not state:
+        return
+    d = state["data"]
+
+    user_id = _get_user_id_by_chat(cid)
+    if not user_id:
+        bot.send_message(cid, "❌ خطا: کاربر یافت نشد.", reply_markup=main_menu())
+        return
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        # ─── درج سفارش ───────────────────────────────────────────
+        cur.execute("""
+            INSERT INTO orders
+              (user_id, invoice_number, customer_name, delivery_date, fabric, notes, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+        """, (
+            user_id,
+            d.get("invoice_number"),
+            d.get("customer_name"),
+            d.get("delivery_date"),
+            d.get("fabric"),
+            d.get("notes"),
+        ))
+        order_id = cur.lastrowid
+
+        # ─── درج آیتم‌های سفارش ──────────────────────────────────
+        total_price = 0
+        for iid, info in d["selected_items"].items():
+            qty        = d["quantities"].get(iid, 1)
+            unit_price = info["price"] or 0
+            side_type  = info["side_type"]
+
+            if side_type == "single":
+                hand_side = d["sides"].get(iid, "none")
+                cur.execute("""
+                    INSERT INTO order_items
+                      (order_id, model_item_id, quantity, unit_price, hand_side)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (order_id, iid, qty, unit_price, hand_side))
+                total_price += qty * unit_price
+
+            elif side_type == "both":
+                # دو ردیف — یکی چپ، یکی راست
+                for hand in ("left", "right"):
+                    cur.execute("""
+                        INSERT INTO order_items
+                          (order_id, model_item_id, quantity, unit_price, hand_side)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (order_id, iid, qty, unit_price, hand))
+                total_price += qty * unit_price * 2
+
+            else:  # none
+                cur.execute("""
+                    INSERT INTO order_items
+                      (order_id, model_item_id, quantity, unit_price, hand_side)
+                    VALUES (%s, %s, %s, %s, 'none')
+                """, (order_id, iid, qty, unit_price))
+                total_price += qty * unit_price
+
+        # ─── درج بدهی ────────────────────────────────────────────
+        cur.execute("""
+            INSERT INTO debts (order_id, user_id, total_amount)
+            VALUES (%s, %s, %s)
+        """, (order_id, user_id, total_price))
+
+        conn.commit()
+
+        bot.send_message(
+            cid,
+            f"✅ *سفارش #{order_id} با موفقیت ثبت شد!*\n"
+            f"پس از بررسی توسط ادمین، وضعیت سفارش اطلاع‌رسانی می‌شود.",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+
+        # ─── نوتیف به ادمین‌ها ───────────────────────────────────
+        admin_text = (
+            f"📬 *سفارش جدید #{order_id}*\n"
+            f"👤 کاربر: chat_id `{cid}`\n"
+            f"🏷 مدل: {d['model_name']}\n"
+            f"👥 مشتری: {d.get('customer_name') or '—'}\n"
+            f"🧵 پارچه: {d.get('fabric') or '—'}\n"
+            f"📅 تحویل: {d.get('delivery_date') or '—'}\n"
+            f"💰 مجموع: {total_price:,} تومان"
+        )
+        notify_admins(admin_text)
+
+    except Exception as e:
+        conn.rollback()
+        bot.send_message(cid, f"❌ خطا در ثبت سفارش:\n{e}", reply_markup=main_menu())
+    finally:
+        cur.close(); conn.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+#  هندلرها
+# ══════════════════════════════════════════════════════════════════════════════════
+
+# ─── شروع ثبت سفارش: از دکمه متنی «ثبت سفارش» یا callback «new_order» ──────────
+
+@bot.message_handler(func=lambda m: m.text == texts["ORDER_REGISTRATION"])
+def handle_order_registration_btn(message):
+    if not is_registered(message.chat.id):
+        return
+    _start_order(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "new_order")
+def handle_new_order_callback(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    _start_order(call.message.chat.id)
+
+
+def _start_order(cid):
+    """لیست مدل‌ها را نشان می‌دهد تا کاربر یکی انتخاب کند."""
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("""
+        SELECT m.id, m.name, COUNT(mi.id) AS item_count
+        FROM models m
+        LEFT JOIN model_items mi ON mi.model_id = m.id
+        GROUP BY m.id, m.name
+        ORDER BY m.id
+    """)
+    models = cur.fetchall()
+    cur.close(); conn.close()
+
+    if not models:
+        bot.send_message(cid, "⚠️ هیچ مدلی در سیستم تعریف نشده است.")
+        return
+
+    markup = InlineKeyboardMarkup()
+    for m in models:
+        markup.add(InlineKeyboardButton(
+            f"📦 {m['name']}  ({m['item_count']} آیتم)",
+            callback_data=f"ord_model_{m['id']}"
+        ))
+    markup.add(InlineKeyboardButton("❌ انصراف", callback_data="ord_cancel"))
+
+    order_reg_state[cid] = {
+        "step": "select_model",
+        "data": {
+            "model_id": None,
+            "model_name": None,
+            "selected_items": {},
+            "qty_queue": [],
+            "quantities": {},
+            "side_queue": [],
+            "sides": {},
+            "invoice_number": None,
+            "customer_name": None,
+            "delivery_date": None,
+            "fabric": None,
+            "notes": None,
+        }
+    }
+
+    bot.send_message(
+        cid,
+        "🏷 *ثبت سفارش جدید*\n\nمدل مورد نظر را انتخاب کنید:",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+
+# ─── انتخاب مدل ──────────────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_model_"))
+def handle_ord_model(call):
+    if not is_registered(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = order_reg_state.get(cid)
+    if not state:
+        bot.answer_callback_query(call.id)
+        return
+
+    model_id = int(call.data.split("_")[-1])
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT id, name FROM models WHERE id=%s", (model_id,))
+    model = cur.fetchone()
+    cur.execute(
+        "SELECT id, name, price, side_type FROM model_items WHERE model_id=%s ORDER BY id",
+        (model_id,)
+    )
+    items = cur.fetchall()
+    cur.close(); conn.close()
+
+    if not model or not items:
+        bot.answer_callback_query(call.id, "⚠️ این مدل آیتمی ندارد.", show_alert=True)
+        return
+
+    bot.answer_callback_query(call.id)
+    state["data"]["model_id"]   = model_id
+    state["data"]["model_name"] = model["name"]
+    state["step"] = "select_items"
+
+    # نمایش چک‌باکس آیتم‌ها — هنوز هیچ کدام انتخاب نشده
+    _show_items_keyboard(cid, items, call.message.message_id, edit=True)
+
+
+def _show_items_keyboard(cid, items=None, message_id=None, edit=False):
+    """
+    کیبورد انتخاب آیتم‌ها با وضعیت چک‌باکس را نشان می‌دهد.
+    اگر items=None باشد، از دیتابیس بر اساس model_id در state می‌گیرد.
+    """
+    state = order_reg_state[cid]
+    model_id = state["data"]["model_id"]
+    selected = state["data"]["selected_items"]  # {item_id: {...}}
+
+    if items is None:
+        conn = get_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT id, name, price, side_type FROM model_items WHERE model_id=%s ORDER BY id",
+            (model_id,)
+        )
+        items = cur.fetchall()
+        cur.close(); conn.close()
+
+    markup = InlineKeyboardMarkup()
+    for it in items:
+        iid = it["id"]
+        checked = "✅" if iid in selected else "⬜"
+        price_str = f" — {int(it['price']):,}" if it['price'] else ""
+        markup.add(InlineKeyboardButton(
+            f"{checked} {it['name']}{price_str}",
+            callback_data=f"ord_item_toggle_{iid}"
+        ))
+
+    # دکمه تأیید انتخاب‌ها
+    done_label = f"✔️ تأیید انتخاب‌ها ({len(selected)} آیتم)" if selected else "✔️ تأیید انتخاب‌ها"
+    markup.add(InlineKeyboardButton(done_label, callback_data="ord_items_done"))
+    markup.add(InlineKeyboardButton("❌ انصراف",             callback_data="ord_cancel"))
+
+    text = (
+        f"🏷 مدل: *{state['data']['model_name']}*\n\n"
+        f"آیتم‌های مورد نظر را انتخاب کنید (می‌توانید چند مورد انتخاب کنید):"
+    )
+
+    if edit and message_id:
+        try:
+            bot.edit_message_text(
+                text, cid, message_id,
+                parse_mode="Markdown", reply_markup=markup
+            )
+        except Exception:
+            bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+
+
+# ─── toggle انتخاب آیتم ──────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_item_toggle_"))
+def handle_ord_item_toggle(call):
+    if not is_registered(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = order_reg_state.get(cid)
+    if not state or state["step"] != "select_items":
+        bot.answer_callback_query(call.id)
+        return
+
+    item_id = int(call.data.split("_")[-1])
+    selected = state["data"]["selected_items"]
+
+    if item_id in selected:
+        del selected[item_id]
+        bot.answer_callback_query(call.id, "حذف شد")
+    else:
+        # اطلاعات آیتم را از دیتابیس می‌گیریم
+        conn = get_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT id, name, price, side_type FROM model_items WHERE id=%s", (item_id,))
+        item = cur.fetchone()
+        cur.close(); conn.close()
+
+        if item:
+            selected[item_id] = {
+                "name":      item["name"],
+                "price":     int(item["price"]) if item["price"] else 0,
+                "side_type": item["side_type"],
+            }
+            bot.answer_callback_query(call.id, "انتخاب شد ✅")
+        else:
+            bot.answer_callback_query(call.id, "خطا")
+            return
+
+    # رفرش کیبورد
+    _show_items_keyboard(cid, message_id=call.message.message_id, edit=True)
+
+
+# ─── تأیید انتخاب آیتم‌ها → شروع پرسش تعداد ────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_items_done")
+def ord_items_done(call):
+    if not is_registered(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = order_reg_state.get(cid)
+
+    if not state or not state["data"]["selected_items"]:
+        bot.answer_callback_query(call.id, "⚠️ حداقل یک آیتم انتخاب کنید.", show_alert=True)
+        return
+
+    bot.answer_callback_query(call.id)
+    bot.delete_message(cid, call.message.message_id)
+
+    # صف تعداد: به ترتیب id
+    state["data"]["qty_queue"] = sorted(state["data"]["selected_items"].keys())
+    state["data"]["quantities"] = {}
+    state["step"] = "enter_qty"
+    _ask_qty(cid)
+
+
+# ─── دریافت تعداد (پیام متنی) ────────────────────────────────────────────────────
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_qty"
+)
+def handle_ord_qty(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    state = order_reg_state[cid]
+    text = message.text.strip()
+
+    if not text.isdigit() or int(text) < 1:
+        bot.send_message(cid, "⚠️ لطفاً یک عدد صحیح بزرگ‌تر از صفر وارد کنید:")
+        return
+
+    queue = state["data"]["qty_queue"]
+    item_id = queue.pop(0)
+    state["data"]["quantities"][item_id] = int(text)
+
+    if queue:
+        _ask_qty(cid)
+    else:
+        _start_side_phase(cid)
+
+
+# ─── دریافت طرف دسته (callback) ──────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_side_"))
+def handle_ord_side(call):
+    if not is_registered(call.message.chat.id):
+        return
+    cid = call.message.chat.id
+    state = order_reg_state.get(cid)
+    if not state or state["step"] != "ask_side":
+        bot.answer_callback_query(call.id)
+        return
+
+    # فرمت: ord_side_{left|right}_{item_id}
+    parts  = call.data.split("_")   # ['ord','side','left','123']
+    hand   = parts[2]               # 'left' or 'right'
+    item_id = int(parts[3])
+
+    queue = state["data"]["side_queue"]
+    if not queue or queue[0] != item_id:
+        bot.answer_callback_query(call.id)
+        return
+
+    queue.pop(0)
+    state["data"]["sides"][item_id] = hand
+    bot.answer_callback_query(call.id)
+    bot.delete_message(cid, call.message.message_id)
+
+    _ask_side(cid)
+
+
+# ─── مرحله شماره فاکتور ──────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_skip_invoice")
+def ord_skip_invoice(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    cid = call.message.chat.id
+    order_reg_state[cid]["data"]["invoice_number"] = None
+    bot.delete_message(cid, call.message.message_id)
+    _ask_customer(cid)
+
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "invoice_number"
+)
+def handle_ord_invoice(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    text = message.text.strip()
+
+    if text == "/skip":
+        order_reg_state[cid]["data"]["invoice_number"] = None
+    else:
+        order_reg_state[cid]["data"]["invoice_number"] = text
+
+    _ask_customer(cid)
+
+
+# ─── مرحله نام مشتری ─────────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_skip_customer")
+def ord_skip_customer(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    cid = call.message.chat.id
+    order_reg_state[cid]["data"]["customer_name"] = None
+    bot.delete_message(cid, call.message.message_id)
+    _ask_delivery(cid)
+
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "customer_name"
+)
+def handle_ord_customer(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    text = message.text.strip()
+
+    if text == "/skip":
+        order_reg_state[cid]["data"]["customer_name"] = None
+    else:
+        order_reg_state[cid]["data"]["customer_name"] = text
+
+    _ask_delivery(cid)
+
+
+# ─── مرحله تاریخ تحویل ───────────────────────────────────────────────────────────
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "delivery_date"
+)
+def handle_ord_delivery(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    text = message.text.strip()
+
+    # اعتبارسنجی ساده فرمت 1404/03/15
+    import re
+    if not re.match(r"^\d{4}/\d{2}/\d{2}$", text):
+        bot.send_message(
+            cid,
+            "⚠️ فرمت تاریخ اشتباه است.\nلطفاً به شکل *1404/03/15* وارد کنید:",
+            parse_mode="Markdown"
+        )
+        return
+
+    order_reg_state[cid]["data"]["delivery_date"] = text
+    _ask_fabric(cid)
+
+
+# ─── مرحله پارچه ─────────────────────────────────────────────────────────────────
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "fabric"
+)
+def handle_ord_fabric(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    text = message.text.strip()
+
+    if not text:
+        bot.send_message(cid, "⚠️ پارچه نمی‌تواند خالی باشد:")
+        return
+
+    order_reg_state[cid]["data"]["fabric"] = text
+    _ask_notes(cid)
+
+
+# ─── مرحله توضیحات ───────────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_skip_notes")
+def ord_skip_notes(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    cid = call.message.chat.id
+    order_reg_state[cid]["data"]["notes"] = None
+    bot.delete_message(cid, call.message.message_id)
+    _show_confirm(cid)
+
+
+@bot.message_handler(
+    func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "notes"
+)
+def handle_ord_notes(message):
+    if not is_registered(message.chat.id):
+        return
+    cid = message.chat.id
+    text = message.text.strip()
+
+    if text == "/skip":
+        order_reg_state[cid]["data"]["notes"] = None
+    else:
+        order_reg_state[cid]["data"]["notes"] = text
+
+    _show_confirm(cid)
+
+
+# ─── تأیید نهایی ─────────────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_confirm")
+def handle_ord_confirm(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    cid = call.message.chat.id
+    bot.delete_message(cid, call.message.message_id)
+    _finalize_order(cid)
+
+
+# ─── لغو در هر مرحله ─────────────────────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ord_cancel")
+def handle_ord_cancel(call):
+    if not is_registered(call.message.chat.id):
+        return
+    bot.answer_callback_query(call.id)
+    cid = call.message.chat.id
+    order_reg_state.pop(cid, None)
+    bot.delete_message(cid, call.message.message_id)
+    bot.send_message(cid, "❌ ثبت سفارش لغو شد.", reply_markup=main_menu())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ---------------------------------------- database ----------------------------------------
 
@@ -158,41 +933,42 @@ def admin_orders_list(chat_id, message_id, status="pending", edit=False):
         bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 # ---------------------------------------- activities ---------------------------------------
+def is_admin(chat_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT 1 FROM admins a
+            JOIN users u ON a.user_id = u.id
+            WHERE u.chat_id = %s
+        """, (chat_id,))
+        result = cursor.fetchone()
+        return bool(result)
+    finally:
+        cursor.close()
+        conn.close()
 
 def is_registered(chat_id):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM users WHERE chat_id = %s", (chat_id,))
-    result = cursor.fetchone()
-    conn.close()
-    cursor.close()
-    if result:
-        return True
-    return False
+    try:
+        cursor.execute("SELECT 1 FROM users WHERE chat_id = %s", (chat_id,))
+        result = cursor.fetchone()
+        return bool(result)
+    finally:
+        cursor.close()
+        conn.close()
 
 def is_superuser(chat_id):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT is_superuser FROM users WHERE chat_id = %s", (chat_id,))
-    result = cursor.fetchone()
-    conn.close()
-    cursor.close()
-    if result and result[0]:
-        return True
-    return False
-
-def is_admin(chat_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 1 FROM admins a
-        JOIN users u ON a.user_id = u.id
-        WHERE u.chat_id = %s
-    """, (chat_id,))
-    result = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    return bool(result)
+    try:
+        cursor.execute("SELECT is_superuser FROM users WHERE chat_id = %s", (chat_id,))
+        result = cursor.fetchone()
+        return bool(result and result[0])
+    finally:
+        cursor.close()
+        conn.close()
 
 def orders_activities(call):
     bot.answer_callback_query(call.id)
@@ -353,145 +1129,6 @@ def do_cancel_activities(call):
     bot.delete_message(chat_id, call.message.message_id)
 
     handle_orders(call)
-
-def _ask_qty(cid):
-    state = order_reg_state[cid]
-    queue = state["data"]["qty_queue"]
-    if not queue:
-        _ask_side_type(cid)
-        return
-    iid = queue[0]
-    iname = state["data"]["model_items"][iid]
-    bot.send_message(cid, f"تعداد '{iname}' را وارد کنید:")
-
-def _ask_side_type(cid):
-    state = order_reg_state[cid]
-    # پیدا کردن آیتم‌هایی که side_type != 'none'
-    selected = state["data"]["selected_items"]
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"USE {DB_NAME}")
-    cursor.execute(
-        f"SELECT id, name, side_type FROM model_items WHERE id IN ({','.join(['%s']*len(selected))})",
-        selected
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    needs_side = [(r[0], r[1]) for r in rows if r[2] != "none"]
-    state["data"]["side_queue"] = needs_side
-    state["data"]["hand_sides"] = {}
-    state["step"] = "enter_side"
-    _ask_next_side(cid)
-
-def _ask_notes(cid):
-    state = order_reg_state[cid]
-    state["step"] = "enter_notes"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("⏭ بدون توضیحات", callback_data="ord_skip_notes"))
-    bot.send_message(cid, "توضیحات سفارش را وارد کنید:", reply_markup=markup)
-
-def _ask_next_side(cid):
-    state = order_reg_state[cid]
-    queue = state["data"]["side_queue"]
-    if not queue:
-        _ask_notes(cid)   
-        return
-    iid, iname = queue[0]
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("چپ", callback_data=f"ord_side_left_{iid}"),
-        InlineKeyboardButton("راست", callback_data=f"ord_side_right_{iid}"),
-        InlineKeyboardButton("هر دو", callback_data=f"ord_side_none_{iid}"),
-    )
-    bot.send_message(cid, f"طرف '{iname}':", reply_markup=markup)
-
-def _finalize_order(cid):
-    state = order_reg_state[cid]
-    data = state["data"]
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM users WHERE chat_id=%s", (cid,))
-    row = cursor.fetchone()
-    if not row:
-        bot.send_message(cid, "ابتدا /start را بزنید.")
-        conn.close()
-        return
-    user_id = row[0]
-
-    notes          = data.get("notes")
-    invoice_number = data.get("invoice_number")
-
-    cursor.execute(
-        """INSERT INTO orders
-           (user_id, fabric_name, customer_name, delivery_date, invoice_number, notes)
-           VALUES (%s, %s, %s, %s, %s, %s)""",
-        (user_id, data["fabric_name"], data["customer_name"],
-         data["delivery_date"], invoice_number, notes)
-    )
-    order_id = cursor.lastrowid
-
-    for iid in data["selected_items"]:
-        cursor.execute("SELECT price FROM model_items WHERE id=%s", (iid,))
-        price_row = cursor.fetchone()
-        unit_price = price_row[0] if price_row and price_row[0] else 0
-        cursor.execute(
-            """INSERT INTO order_items
-               (order_id, model_item_id, quantity, unit_price, hand_side)
-               VALUES (%s,%s,%s,%s,%s)""",
-            (order_id, iid, data["quantities"][iid], unit_price,
-             data["hand_sides"].get(iid, "none"))
-        )
-
-    conn.commit()
-    cursor.execute("SELECT name, phone FROM users WHERE id=%s", (user_id,))
-    urow   = cursor.fetchone()
-    uname  = urow[0] if urow else "نامشخص"
-    uphone = urow[1] if urow else "—"
-    conn.close()
-
-    invoice_line = f"🧾 فاکتور: {invoice_number}\n" if invoice_number else ""
-
-    notify_admins(
-        f"🔔 *سفارش جدید ثبت شد*\n"
-        f"شماره سفارش: #{order_id}\n"
-        f"👤 ثبت‌کننده: {uname} | {uphone}\n"
-        f"🧵 پارچه: {data['fabric_name']}\n"
-        f"👥 مشتری: {data['customer_name']}\n"
-        f"📅 تاریخ تحویل: {data['delivery_date']}\n"
-        f"{invoice_line}"
-        f"chat_id: `{cid}`"
-    )
-
-    del order_reg_state[cid]
-    bot.send_message(
-        cid,
-        f"✅ سفارش #{order_id} با موفقیت ثبت شد.\n"
-        f"🧵 پارچه: {data['fabric_name']}\n"
-        f"👥 مشتری: {data['customer_name']}\n"
-        f"📅 تحویل: {data['delivery_date']}\n"
-        + (f"🧾 فاکتور: {invoice_number}" if invoice_number else ""),
-        reply_markup=main_menu()
-    )
-
-def order_registration(message):
-    cid = message.chat.id
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"USE {DB_NAME}")
-    cursor.execute("SELECT id, name FROM models")
-    models = cursor.fetchall()
-    conn.close()
-
-    if not models:
-        bot.send_message(cid, "هیچ مدلی ثبت نشده است.")
-        return
-
-    markup = InlineKeyboardMarkup()
-    for mid, mname in models:
-        markup.add(InlineKeyboardButton(mname, callback_data=f"ord_model_{mid}"))
-    order_reg_state[cid] = {"step": "enter_fabric", "data": {"items": []}}        
-    bot.send_message(cid, "🧵 نام و کد پارچه را وارد کنید:",parse_mode="Markdown")
 
 def finance_activities(call):
     bot.answer_callback_query(call.id)
@@ -998,12 +1635,6 @@ def start(message):
 
 # ---------------------------------------- text handlers ----------------------------------------
 
-@bot.message_handler(func=lambda message: message.text == texts["ORDER_REGISTRATION"])
-def handle_order_registration(message):
-    if not is_registered(message.chat.id):
-        return
-    order_registration(message)
-
 @bot.message_handler(func=lambda message: message.text == texts["MORE"])
 def handle_more(message):
     if not is_registered(message.chat.id):
@@ -1117,134 +1748,6 @@ def handle_new_model_item_steps(message):
             reply_markup=markup
         )
 
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_invoice")
-def ord_enter_invoice(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    text = message.text.strip()
-
-    # /skip یا خالی → null ذخیره می‌شه
-    order_reg_state[cid]["data"]["invoice_number"] = None if text == "/skip" else text
-    order_reg_state[cid]["step"] = "select_model"
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM models")
-    models = cursor.fetchall()
-    conn.close()
-
-    if not models:
-        bot.send_message(cid, "هیچ مدلی ثبت نشده است.")
-        del order_reg_state[cid]
-        return
-
-    markup = InlineKeyboardMarkup()
-    for mid, mname in models:
-        markup.add(InlineKeyboardButton(mname, callback_data=f"ord_model_{mid}"))
-    bot.send_message(cid, "🏗️ مدل مورد نظر را انتخاب کنید:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_qty")
-def ord_enter_qty(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    if not message.text.isdigit() or int(message.text) < 1:
-        bot.send_message(cid, "عدد معتبر وارد کنید:")
-        return
-    state = order_reg_state[cid]
-    iid = state["data"]["qty_queue"].pop(0)
-    state["data"]["quantities"][iid] = int(message.text)
-    _ask_qty(cid)
-
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_notes")
-def ord_enter_notes(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    order_reg_state[cid]["data"]["notes"] = message.text
-    _finalize_order(cid)
-
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_fabric")
-def ord_enter_fabric(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    fabric = message.text.strip()
-    if not fabric:
-        bot.send_message(cid, "⚠️ نام پارچه نمی‌تواند خالی باشد:")
-        return
-    order_reg_state[cid]["data"]["fabric_name"] = fabric
-    order_reg_state[cid]["step"] = "enter_customer"
-    bot.send_message(cid, "👤 نام مشتری را وارد کنید:")
-
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_customer")
-def ord_enter_customer(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    customer = message.text.strip()
-    if not customer:
-        bot.send_message(cid, "⚠️ نام مشتری نمی‌تواند خالی باشد:")
-        return
-    order_reg_state[cid]["data"]["customer_name"] = customer
-    order_reg_state[cid]["step"] = "enter_delivery"
-    bot.send_message(
-        cid,
-        "📅 تاریخ تحویل را وارد کنید:\n_(فرمت: YYYY/MM/DD  مثال: ۱۴۰۴/۰۵/۲۰)_",
-        parse_mode="Markdown"
-    )
-
-@bot.message_handler(func=lambda m: order_reg_state.get(m.chat.id, {}).get("step") == "enter_delivery")
-def ord_enter_delivery(message):
-    if not is_registered(message.chat.id):
-        return
-    cid = message.chat.id
-    raw = message.text.strip().replace("\\", "/").replace(".", "/")
-
-    # تبدیل اعداد فارسی به انگلیسی
-    fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-    raw = raw.translate(fa_digits)
-
-    parts = raw.split("/")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
-        bot.send_message(cid, "⚠️ فرمت تاریخ درست نیست. لطفاً به شکل YYYY/MM/DD وارد کنید:")
-        return
-
-    year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
-
-    # اگر سال شمسی وارد شده (مثلاً ۱۴۰۴) به میلادی تبدیل کن
-    if year > 1500:
-        # تبدیل ساده شمسی به میلادی (تقریبی برای ذخیره در DATE)
-        year = year - 1279  # 1404 → 2025 (تقریب)
-
-    try:
-        delivery_date = datetime.date(year, month, day)
-    except ValueError:
-        bot.send_message(cid, "⚠️ تاریخ معتبر نیست. دوباره وارد کنید:")
-        return
-
-
-    order_reg_state[cid]["data"]["delivery_date"] = str(delivery_date)
-    order_reg_state[cid]["step"] = "enter_invoice"
-    bot.send_message(cid,"🧾 شماره فاکتور را وارد کنید:\n_(اگر ندارید /skip بزنید)_",parse_mode="Markdown")
-
-    # حالا انتخاب مدل
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM models")
-    models = cursor.fetchall()
-    conn.close()
-
-    if not models:
-        bot.send_message(cid, "هیچ مدلی ثبت نشده است.")
-        del order_reg_state[cid]
-        return
-
-    markup = InlineKeyboardMarkup()
-    for mid, mname in models:
-        markup.add(InlineKeyboardButton(mname, callback_data=f"ord_model_{mid}"))
-    bot.send_message(cid, "🏗️ مدل مورد نظر را انتخاب کنید:", reply_markup=markup)
 
 # ─── Admin Items Management ───────────────────────────────────────────────────
 
@@ -1531,7 +2034,7 @@ def handle_admin_user_delete_confirm(call):
         conn.close()
 
     admin_users_list(cid)
-    
+
 @bot.callback_query_handler(func=lambda c: c.data == "admin_users_list")
 def handle_admin_users_list(call):
     if not is_admin(call.message.chat.id):
@@ -1661,15 +2164,6 @@ def handle_do_cancel(call):
         return
     
     do_cancel_activities(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "new_order")
-def handle_new_order(call):
-    if not is_registered(call.message.chat.id):
-        return
-    bot.answer_callback_query(call.id)
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    order_registration(call.message)
-
 @bot.callback_query_handler(func=lambda call: call.data == "finence")
 def handle_finence(call):
     if not is_registered(call.message.chat.id):
@@ -1742,74 +2236,7 @@ def handle_suport(call):
     reply_markup=more_menu(cid=call.message.chat.id)
 )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_side_"))
-def ord_select_side(call):
-    if not is_registered(call.message.chat.id):
-        return
-    bot.answer_callback_query(call.id)
-    cid = call.message.chat.id
-    parts = call.data.split("_")
-    side = parts[2]   # left / right / none
-    iid = int(parts[3])
-    state = order_reg_state.get(cid)
-    if not state:
-        return
-    state["data"]["hand_sides"][iid] = side
-    state["data"]["side_queue"].pop(0)
-    bot.delete_message(cid, call.message.message_id)
-    _ask_next_side(cid)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_model_"))
-def ord_select_model(call):
-    if not is_registered(call.message.chat.id):
-        return
-    cid = call.message.chat.id
-    mid = int(call.data.split("_")[2])
-    state = order_reg_state.get(cid)
-    if not state:
-        return
-    state["data"]["model_id"] = mid
-    state["data"]["selected_items"] = []
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f"USE {DB_NAME}")
-    cursor.execute("SELECT id, name FROM model_items WHERE model_id=%s", (mid,))
-    items = cursor.fetchall()
-    conn.close()
-
-    state["data"]["model_items"] = {i[0]: i[1] for i in items}
-    state["step"] = "select_items"
-
-    markup = InlineKeyboardMarkup()
-    for iid, iname in items:
-        markup.add(InlineKeyboardButton(f"➕ {iname}", callback_data=f"ord_item_{iid}"))
-    markup.add(InlineKeyboardButton("✅ تأیید انتخاب‌ها", callback_data="ord_items_done"))
-    bot.edit_message_text("آیتم‌های مورد نظر را انتخاب کنید:", cid, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ord_item_"))
-def ord_toggle_item(call):
-    if not is_registered(call.message.chat.id):
-        return
-    bot.answer_callback_query(call.id)
-    cid = call.message.chat.id
-    iid = int(call.data.split("_")[2])
-    state = order_reg_state.get(cid)
-    if not state:
-        return
-    selected = state["data"]["selected_items"]
-    if iid in selected:
-        selected.remove(iid)
-    else:
-        selected.append(iid)
-    # نمایش وضعیت آپدیت‌شده
-    items = state["data"]["model_items"]
-    markup = InlineKeyboardMarkup()
-    for item_id, item_name in items.items():
-        prefix = "✅" if item_id in selected else "➕"
-        markup.add(InlineKeyboardButton(f"{prefix} {item_name}", callback_data=f"ord_item_{item_id}"))
-    markup.add(InlineKeyboardButton("✅ تأیید انتخاب‌ها", callback_data="ord_items_done"))
-    bot.edit_message_reply_markup(cid, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == "ord_items_done")
 def ord_items_done(call):
@@ -2092,7 +2519,7 @@ def handle_admin_order_detail(call):
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
         SELECT o.id, o.status, o.notes, o.created_at,
-               o.fabric_name, o.customer_name, o.delivery_date,o.invoice_number
+               o.fabric_name, o.customer_name, o.delivery_date,o.invoice_number,
                u.name, u.phone, u.chat_id AS user_chat_id
         FROM orders o JOIN users u ON o.user_id = u.id
         WHERE o.id = %s
