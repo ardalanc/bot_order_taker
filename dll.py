@@ -80,8 +80,8 @@ def create_table_orders():
     user_id        INT NOT NULL,
     invoice_number VARCHAR(100) NULL,
     customer_name  VARCHAR(100) NULL,
-    delivery_date  date  NULL,
-    fabric         VARCHAR(200) NULL,
+    delivery_date  DATE  NULL,
+    fabric_name    VARCHAR(200) NULL,
     status         ENUM('pending','confirmed','in_progress','delivered','cancelled') DEFAULT 'pending',
     notes          TEXT,
     created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -224,6 +224,24 @@ CREATE TABLE admins (
     conn.close()
     print(f'table admins created successfully')
 
+def seed_admin(chat_id, name = "Admin"):
+    conn = mysql.connector.connect(**database_config, database=DB_NAME)
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT IGNORE INTO users (chat_id, name, is_superuser)
+        VALUES (%s, %s, 1)
+    """, (chat_id, name))
+
+    cur.execute("SELECT id FROM users WHERE chat_id = %s", (chat_id,))
+    user_id = cur.fetchone()[0]
+
+    cur.execute("""INSERT IGNORE INTO admins (user_id) VALUES (%s)""", (user_id,))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"Admin with chat_id {chat_id} seeded successfully.")
 
 
 if __name__ == "__main__":
@@ -238,3 +256,4 @@ if __name__ == "__main__":
     create_table_debts()
     create_table_payment_debts()
     create_table_admins()
+    seed_admin(chat_id=715337548, name="ََARDALAN")

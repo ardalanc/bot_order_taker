@@ -1,21 +1,10 @@
-# --- Python ---
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# --- Virtual Environment ---
 venv/
 .venv/
 env/
-
-# --- IDE/Editor ---
 .vscode/
 .DS_Store
-
-# --- Secrets/Sensitive Data ---
-# حتما این بخش را نگه دار، چون فایل‌های حساس تو اینجا هستند
 .env
-
-# نکته: اگر در config.py پسورد یا API Key واقعی داری، آن را هم به لیست زیر اضافه کن
-# یا بهتر است یک فایل config.example.py بسازی و اطلاعات واقعی را در config.py بگذاری و آن را Ignore کنی.
